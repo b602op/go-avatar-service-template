@@ -22,6 +22,7 @@ import (
 	"github.com/b602op/avatars-service/internal/services/publisher"
 	"github.com/b602op/avatars-service/internal/services/s3"
 	"github.com/b602op/avatars-service/pkg/logger"
+	"github.com/b602op/avatars-service/pkg/telemetry"
 )
 
 const (
@@ -62,7 +63,7 @@ func run() error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	log := logger.New(cfg.App.LogLevel)
+	log := logger.New(cfg.LogLevel, "server")
 	slog.SetDefault(log)
 
 	log.Info("starting server", "config", cfg.String())
@@ -74,6 +75,36 @@ func run() error {
 		syscall.SIGTERM,
 	)
 	defer stopSignals()
+
+	// Трейсинг: OTLP HTTP → Jaeger. Недоступность коллектора не фатальна:
+	// соединение устанавливается лениво, а ошибки экспорта уходят в наш slog
+	// через otel.SetErrorHandler.
+	tpShutdown, err := telemetry.Init(signalCtx, telemetry.Config{
+		Endpoint:       cfg.OTelEndpoint,
+		ServiceName:    cfg.OTelServiceName + "-server",
+		ServiceVersion: cfg.OTelServiceVersion,
+		Environment:    cfg.OTelEnvironment,
+	})
+	if err != nil {
+		return fmt.Errorf("init telemetry: %w", err)
+	}
+	// Трейсинг останавливается последним по времени: defer выполняется по LIFO,
+	// а этот зарегистрирован раньше остальных, поэтому к моменту flush уже
+	// остановлены HTTP-сервер, пул БД и publisher — их shutdown-спаны попадают
+	// в батч. Порядок менять не нужно.
+	defer func() {
+		shutdownCtx, cancelShutdown := context.WithTimeout(
+			context.WithoutCancel(signalCtx),
+			telemetry.ShutdownTimeout,
+		)
+		defer cancelShutdown()
+
+		// Трейсы — best-effort телеметрия: неудачный flush не должен
+		// менять код возврата и провоцировать рестарт контейнера.
+		if shutdownErr := tpShutdown(shutdownCtx); shutdownErr != nil {
+			log.Warn("telemetry shutdown failed", "error", shutdownErr)
+		}
+	}()
 
 	// Контекст только для инициализации зависимостей.
 	initCtx, cancelInit := context.WithTimeout(context.Background(), initTimeout)

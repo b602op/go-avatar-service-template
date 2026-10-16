@@ -7,25 +7,11 @@ import (
 )
 
 // New создаёт slog.Logger с JSON-хендлером, пишущим в os.Stdout.
-// Уровень задаётся строкой (debug|info|warn|error); при неизвестном
-// значении используется info.
-func New(level string) *slog.Logger {
-	handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: parseLevel(level),
-	})
-	return slog.New(handler)
-}
-
-// parseLevel маппит строковый уровень логирования в slog.Level.
-func parseLevel(level string) slog.Level {
-	switch level {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
+// Уровень приходит уже распарсенным (см. config.getEnvLogLevel).
+// Каждая запись получает атрибут service, а также trace_id/span_id, если
+// в контексте есть активный span (см. traceAwareHandler).
+func New(level slog.Level, serviceName string) *slog.Logger {
+	base := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})
+	h := &traceAwareHandler{baseHandler: base}
+	return slog.New(h).With("service", serviceName)
 }

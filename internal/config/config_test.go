@@ -1,6 +1,7 @@
 package config
 
 import (
+	"log/slog"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ var allEnvKeys = []string{
 	"POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "POSTGRES_SSLMODE",
 	"S3_ENDPOINT", "S3_ACCESS_KEY", "S3_SECRET_KEY", "S3_BUCKET", "S3_REGION", "S3_USE_SSL",
 	"RABBITMQ_URL", "RABBITMQ_EXCHANGE", "RABBITMQ_RETRY_TTL",
+	"OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_SERVICE_NAME", "OTEL_SERVICE_VERSION", "OTEL_ENVIRONMENT",
 }
 
 // clearEnv сбрасывает все переменные окружения, влияющие на Load.
@@ -36,7 +38,12 @@ func TestLoad_Defaults(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "local", cfg.App.Env)
-	assert.Equal(t, "info", cfg.App.LogLevel)
+	assert.Equal(t, slog.LevelInfo, cfg.LogLevel)
+
+	assert.Equal(t, "http://localhost:4318", cfg.OTelEndpoint)
+	assert.Equal(t, "gophprofile", cfg.OTelServiceName)
+	assert.Equal(t, "dev", cfg.OTelServiceVersion)
+	assert.Equal(t, "dev", cfg.OTelEnvironment)
 
 	assert.Equal(t, "8080", cfg.HTTP.Port)
 	assert.Equal(t, 10*time.Second, cfg.HTTP.ReadTimeout)
@@ -77,6 +84,16 @@ func TestLoad_RabbitMQRetryTTL_Invalid(t *testing.T) {
 	_, err := Load()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "RABBITMQ_RETRY_TTL")
+}
+
+func TestLoad_InvalidLogLevel(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("LOG_LEVEL", "verbose")
+
+	_, err := Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "LOG_LEVEL")
+	assert.Contains(t, err.Error(), "verbose")
 }
 
 func TestLoad_InvalidPort(t *testing.T) {

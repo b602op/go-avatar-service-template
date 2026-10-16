@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
@@ -21,12 +22,20 @@ type Config struct {
 	Postgres PostgresConfig
 	S3       S3Config
 	RabbitMQ RabbitMQConfig
+
+	// LogLevel — уровень логирования, уже распарсенный в slog.Level.
+	LogLevel slog.Level
+
+	// Observability: OpenTelemetry (трейсинг через OTLP HTTP → Jaeger).
+	OTelEndpoint       string // OTEL_EXPORTER_OTLP_ENDPOINT, напр. http://localhost:4318
+	OTelServiceName    string // OTEL_SERVICE_NAME; к нему добавляется суффикс -server/-worker
+	OTelServiceVersion string // OTEL_SERVICE_VERSION
+	OTelEnvironment    string // OTEL_ENVIRONMENT
 }
 
 // AppConfig — общие настройки приложения.
 type AppConfig struct {
-	Env      string // local | prod
-	LogLevel string // debug | info | warn | error
+	Env string // local | prod
 }
 
 // HTTPConfig — настройки HTTP-сервера.
@@ -104,12 +113,20 @@ func Load() (*Config, error) {
 	if err != nil {
 		errs = append(errs, err)
 	}
+	logLevel, err := getEnvLogLevel("LOG_LEVEL", slog.LevelInfo)
+	if err != nil {
+		errs = append(errs, err)
+	}
 
 	cfg := &Config{
 		App: AppConfig{
-			Env:      env,
-			LogLevel: getEnv("LOG_LEVEL", "info"),
+			Env: env,
 		},
+		LogLevel:           logLevel,
+		OTelEndpoint:       getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318"),
+		OTelServiceName:    getEnv("OTEL_SERVICE_NAME", "gophprofile"),
+		OTelServiceVersion: getEnv("OTEL_SERVICE_VERSION", "dev"),
+		OTelEnvironment:    getEnv("OTEL_ENVIRONMENT", "dev"),
 		HTTP: HTTPConfig{
 			Port:         getEnv("HTTP_PORT", "8080"),
 			ReadTimeout:  readTimeout,
@@ -231,16 +248,18 @@ func (c PostgresConfig) ValidateDSN() error {
 // String возвращает человекочитаемое представление конфига с маскировкой секретов.
 func (c Config) String() string {
 	return fmt.Sprintf(
-		"Config{App={Env:%s LogLevel:%s}, HTTP={Port:%s ReadTimeout:%s WriteTimeout:%s}, "+
+		"Config{App={Env:%s}, LogLevel:%s, HTTP={Port:%s ReadTimeout:%s WriteTimeout:%s}, "+
 			"Postgres={Host:%s Port:%s User:%s Password:%s DB:%s SSLMode:%s}, "+
 			"S3={Endpoint:%s Bucket:%s Region:%s AccessKey:%s SecretKey:%s UseSSL:%t}, "+
-			"RabbitMQ={URL:%s Exchange:%s}}",
-		c.App.Env, c.App.LogLevel,
+			"RabbitMQ={URL:%s Exchange:%s}, "+
+			"OTel={Endpoint:%s ServiceName:%s ServiceVersion:%s Environment:%s}}",
+		c.App.Env, c.LogLevel,
 		c.HTTP.Port, c.HTTP.ReadTimeout, c.HTTP.WriteTimeout,
 		c.Postgres.Host, c.Postgres.Port, c.Postgres.User, mask(c.Postgres.Password),
 		c.Postgres.DB, c.Postgres.SSLMode,
 		c.S3.Endpoint, c.S3.Bucket, c.S3.Region, mask(c.S3.AccessKey), mask(c.S3.SecretKey), c.S3.UseSSL,
 		maskURL(c.RabbitMQ.URL), c.RabbitMQ.Exchange,
+		c.OTelEndpoint, c.OTelServiceName, c.OTelServiceVersion, c.OTelEnvironment,
 	)
 }
 
@@ -279,6 +298,28 @@ func getEnvDuration(key string, def time.Duration) (time.Duration, error) {
 		return def, fmt.Errorf("%s must be a valid duration (e.g. 10s), got %q", key, raw)
 	}
 	return d, nil
+}
+
+// getEnvLogLevel парсит уровень логирования в slog.Level.
+// Пустое значение → def; невалидное — ошибка: лучше упасть на старте,
+// чем молча логировать не тем уровнем, который просили.
+func getEnvLogLevel(key string, def slog.Level) (slog.Level, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return def, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "debug":
+		return slog.LevelDebug, nil
+	case "info":
+		return slog.LevelInfo, nil
+	case "warn":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	default:
+		return def, fmt.Errorf("%s must be one of debug|info|warn|error, got %q", key, raw)
+	}
 }
 
 // getEnvBool парсит bool из переменной окружения.
